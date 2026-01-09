@@ -1,0 +1,14 @@
+# DOKU API Tester Dependencies
+# =============================
+
+# HTTP requests library
+requests>=2.28.0
+
+# For environment variable management (optional)
+python-dotenv>=1.0.0
+
+# For colorful console output (optional)
+colorama>=0.4.6
+
+# For table formatting in CLI (optional)
+tabulate>=0.9.0
