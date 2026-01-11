@@ -12,6 +12,9 @@ from doku_api_tester import (
     DokuSignatureGenerator,
     DokuConfig,
     DokuAPIClient,
+    DokuSnapClient,
+    DokuSnapConfig,
+    DokuSnapQrisApi,
     Environment
 )
 from config import VAChannels, DokuEndpoints, DokuResponseCodes
@@ -209,33 +212,74 @@ def menu_test_qris():
     """Menu untuk test QRIS"""
     print_header("TEST QRIS")
     
-    print("Untuk test ini, Anda memerlukan credentials dari DOKU Dashboard")
+    print("Untuk test ini, Anda memerlukan konfigurasi QRIS SNAP dari DOKU")
     print()
     
-    client_id = get_input("Client ID")
-    if not client_id:
-        print_error("Client ID diperlukan!")
+    snap_client_key = get_input("SNAP Client Key (X-CLIENT-KEY)")
+    if not snap_client_key:
+        print_error("SNAP Client Key diperlukan!")
         return
     
-    secret_key = get_input("Secret Key")
-    if not secret_key:
-        print_error("Secret Key diperlukan!")
+    snap_client_secret = get_input("SNAP Client Secret")
+    if not snap_client_secret:
+        print_error("SNAP Client Secret diperlukan!")
         return
+
+    private_key_path = get_input("Private Key Path (PEM)")
+    if not private_key_path:
+        print_error("Private Key Path diperlukan!")
+        return
+
+    try:
+        with open(private_key_path, "r", encoding="utf-8") as f:
+            private_key_pem = f.read()
+    except Exception as e:
+        print_error(f"Gagal membaca private key: {e}")
+        return
+
+    merchant_id = get_input("QRIS Merchant ID")
+    if not merchant_id:
+        print_error("QRIS Merchant ID diperlukan!")
+        return
+
+    terminal_id = get_input("QRIS Terminal ID")
+    if not terminal_id:
+        print_error("QRIS Terminal ID diperlukan!")
+        return
+
+    channel_id = get_input("CHANNEL-ID", "H2H")
     
     print()
     amount = int(get_input("Amount (Rupiah)", "10000"))
-    customer_name = get_input("Customer Name", "Test Customer")
+    postal_code = get_input("Postal Code (opsional)", "")
+    fee_type = get_input("Fee Type (opsional)", "")
+    postal_code = postal_code or None
+    fee_type = fee_type or None
     
     print()
     print_info("Sending request to DOKU...")
     
-    tester = DokuApiTester(client_id, secret_key, use_sandbox=True)
-    
     try:
-        result = tester.qris_api.create_qris(
-            invoice_number=f"INV-QRIS-{datetime.now().strftime('%Y%m%d%H%M%S')}",
-            amount=amount,
-            customer_name=customer_name
+        snap_config = DokuSnapConfig(
+            client_key=snap_client_key,
+            client_secret=snap_client_secret,
+            private_key_pem=private_key_pem,
+            environment=Environment.SANDBOX,
+        )
+        snap_client = DokuSnapClient(snap_config)
+        qris_api = DokuSnapQrisApi(
+            client=snap_client,
+            partner_id=snap_client_key,
+            merchant_id=merchant_id,
+            terminal_id=terminal_id,
+            channel_id=channel_id,
+        )
+
+        result = qris_api.generate(
+            partner_reference_no=f"INV-QRIS-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+            amount_idr=amount,
+            postal_code=postal_code,
+            fee_type=fee_type,
         )
         
         print()

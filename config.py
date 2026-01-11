@@ -100,7 +100,7 @@ class DokuEndpoints:
     VA_DELETE = "/doku-virtual-account/v2/payment-code/{payment_code}"
     
     # QRIS
-    QRIS_CREATE = "/qris/v1/create"
+    QRIS_CREATE = "/snap-adapter/b2b/v1.0/qr/qr-mpm-generate"
     
     # Order Status
     ORDER_STATUS = "/orders/v1/status/{invoice_number}"

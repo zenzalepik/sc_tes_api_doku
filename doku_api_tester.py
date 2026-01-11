@@ -17,11 +17,12 @@ import base64
 import json
 import uuid
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass
 from typing import Optional, Dict, Any
 from enum import Enum
 import logging
+import os
 
 # Setup logging
 logging.basicConfig(
@@ -382,6 +383,178 @@ class QRISApi:
             return {"raw": response.text}
 
 
+@dataclass
+class DokuSnapConfig:
+    client_key: str
+    client_secret: str
+    private_key_pem: str
+    environment: Environment = Environment.SANDBOX
+
+    @property
+    def base_url(self) -> str:
+        if self.environment == Environment.SANDBOX:
+            return "https://api-sandbox.doku.com"
+        return "https://api.doku.com"
+
+
+class DokuSnapSignature:
+    @staticmethod
+    def _minify_json(body: Dict[str, Any]) -> str:
+        return json.dumps(body, separators=(",", ":"))
+
+    @staticmethod
+    def sha256_hex_lower(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest().lower()
+
+    @staticmethod
+    def hmac_sha512_base64(secret: str, text: str) -> str:
+        mac = hmac.new(secret.encode("utf-8"), text.encode("utf-8"), hashlib.sha512).digest()
+        return base64.b64encode(mac).decode("utf-8")
+
+    @staticmethod
+    def rsa_sha256_base64(private_key_pem: str, text: str) -> str:
+        try:
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import padding
+        except Exception as e:
+            raise RuntimeError("Dependency 'cryptography' diperlukan untuk SNAP token") from e
+
+        key = serialization.load_pem_private_key(private_key_pem.encode("utf-8"), password=None)
+        signature = key.sign(text.encode("utf-8"), padding.PKCS1v15(), hashes.SHA256())
+        return base64.b64encode(signature).decode("utf-8")
+
+
+class DokuSnapClient:
+    def __init__(self, config: DokuSnapConfig):
+        self.config = config
+        self.session = requests.Session()
+
+    def _timestamp_utc_z(self) -> str:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def get_b2b_token(self) -> Dict[str, Any]:
+        endpoint = "/authorization/v1/access-token/b2b"
+        url = f"{self.config.base_url}{endpoint}"
+
+        timestamp = self._timestamp_utc_z()
+        string_to_sign = f"{self.config.client_key}|{timestamp}"
+        x_signature = DokuSnapSignature.rsa_sha256_base64(self.config.private_key_pem, string_to_sign)
+
+        headers = {
+            "X-CLIENT-KEY": self.config.client_key,
+            "X-TIMESTAMP": timestamp,
+            "X-SIGNATURE": x_signature,
+            "Content-Type": "application/json",
+        }
+        body = {"grantType": "client_credentials"}
+        body_str = json.dumps(body, separators=(",", ":"))
+
+        logger.info(f"POST {url}")
+        logger.info(f"Request Headers: {json.dumps(headers, indent=2)}")
+        logger.info(f"Body: {body_str}")
+
+        response = self.session.post(url, data=body_str.encode("utf-8"), headers=headers)
+        logger.info(f"Response Status: {response.status_code}")
+        logger.info(f"Response Body: {response.text}")
+
+        data: Optional[Dict[str, Any]]
+        try:
+            data = response.json() if response.text else None
+        except Exception:
+            data = {"raw": response.text}
+        return {"status_code": response.status_code, "data": data}
+
+
+class DokuSnapQrisApi:
+    ENDPOINT_GENERATE = "/snap-adapter/b2b/v1.0/qr/qr-mpm-generate"
+
+    def __init__(
+        self,
+        client: DokuSnapClient,
+        partner_id: str,
+        merchant_id: str,
+        terminal_id: str,
+        channel_id: str = "H2H",
+    ):
+        self.client = client
+        self.partner_id = partner_id
+        self.merchant_id = merchant_id
+        self.terminal_id = terminal_id
+        self.channel_id = channel_id
+
+    def _timestamp_utc_z(self) -> str:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _external_id(self) -> str:
+        return str(uuid.uuid4().int)[:32]
+
+    def generate(
+        self,
+        partner_reference_no: str,
+        amount_idr: int,
+        validity_period: Optional[str] = None,
+        postal_code: Optional[str] = None,
+        fee_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        token_result = self.client.get_b2b_token()
+        if token_result["status_code"] != 200 or not token_result.get("data"):
+            return token_result
+
+        access_token = str(token_result["data"].get("accessToken", "")).strip()
+        if not access_token:
+            return {"status_code": 500, "data": {"error": {"message": "Access token kosong"}}}
+
+        endpoint = self.ENDPOINT_GENERATE
+        url = f"{self.client.config.base_url}{endpoint}"
+        timestamp = self._timestamp_utc_z()
+
+        body: Dict[str, Any] = {
+            "partnerReferenceNo": partner_reference_no,
+            "amount": {"value": f"{amount_idr:.2f}", "currency": "IDR"},
+            "merchantId": self.merchant_id,
+            "terminalId": self.terminal_id,
+        }
+        if validity_period:
+            body["validityPeriod"] = validity_period
+        if postal_code or fee_type:
+            body["additionalInfo"] = {}
+            if postal_code:
+                body["additionalInfo"]["postalCode"] = postal_code
+            if fee_type:
+                body["additionalInfo"]["feeType"] = fee_type
+
+        body_str = DokuSnapSignature._minify_json(body)
+        body_hash = DokuSnapSignature.sha256_hex_lower(body_str)
+
+        string_to_sign = f"POST:{endpoint}:{access_token}:{body_hash}:{timestamp}"
+        x_signature = DokuSnapSignature.hmac_sha512_base64(self.client.config.client_secret, string_to_sign)
+
+        headers = {
+            "X-PARTNER-ID": self.partner_id,
+            "X-EXTERNAL-ID": self._external_id(),
+            "X-TIMESTAMP": timestamp,
+            "X-SIGNATURE": x_signature,
+            "Authorization": f"Bearer {access_token}",
+            "CHANNEL-ID": self.channel_id,
+            "Content-Type": "application/json",
+        }
+
+        logger.info(f"POST {url}")
+        logger.info(f"Request Headers: {json.dumps(headers, indent=2)}")
+        logger.info(f"Body: {json.dumps(body, indent=2)}")
+
+        response = self.client.session.post(url, data=body_str.encode("utf-8"), headers=headers)
+        logger.info(f"Response Status: {response.status_code}")
+        logger.info(f"Response Body: {response.text}")
+
+        data: Optional[Dict[str, Any]]
+        try:
+            data = response.json() if response.text else None
+        except Exception:
+            data = {"raw": response.text}
+        return {"status_code": response.status_code, "data": data}
+
+
 class DokuApiTester:
     """
     Utility class untuk testing API DOKU dengan mudah
@@ -472,16 +645,54 @@ class DokuApiTester:
         Test pembuatan QRIS
         """
         logger.info("=== Testing Create QRIS ===")
-        
+
+        snap_client_key = os.getenv("DOKU_SNAP_CLIENT_KEY", self.config.client_id)
+        snap_client_secret = os.getenv("DOKU_SNAP_CLIENT_SECRET", "")
+        private_key_pem = os.getenv("DOKU_SNAP_PRIVATE_KEY", "")
+        private_key_path = os.getenv("DOKU_SNAP_PRIVATE_KEY_PATH", "")
+        if not private_key_pem and private_key_path:
+            try:
+                with open(private_key_path, "r", encoding="utf-8") as f:
+                    private_key_pem = f.read()
+            except Exception:
+                private_key_pem = ""
+
+        qris_merchant_id = os.getenv("DOKU_QRIS_MERCHANT_ID", "")
+        qris_terminal_id = os.getenv("DOKU_QRIS_TERMINAL_ID", "")
+        qris_channel_id = os.getenv("DOKU_QRIS_CHANNEL_ID", "H2H")
+        qris_postal_code = os.getenv("DOKU_QRIS_POSTAL_CODE", "") or None
+        qris_fee_type = os.getenv("DOKU_QRIS_FEE_TYPE", "") or None
+
+        if snap_client_key and snap_client_secret and private_key_pem and qris_merchant_id and qris_terminal_id:
+            snap_config = DokuSnapConfig(
+                client_key=snap_client_key,
+                client_secret=snap_client_secret,
+                private_key_pem=private_key_pem,
+                environment=self.config.environment,
+            )
+            snap_client = DokuSnapClient(snap_config)
+            qris_api = DokuSnapQrisApi(
+                client=snap_client,
+                partner_id=snap_client_key,
+                merchant_id=qris_merchant_id,
+                terminal_id=qris_terminal_id,
+                channel_id=qris_channel_id,
+            )
+
+            partner_reference_no = f"INV-QRIS-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            return qris_api.generate(
+                partner_reference_no=partner_reference_no,
+                amount_idr=amount,
+                postal_code=qris_postal_code,
+                fee_type=qris_fee_type,
+            )
+
         invoice_number = f"INV-QRIS-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-        
-        result = self.qris_api.create_qris(
+        return self.qris_api.create_qris(
             invoice_number=invoice_number,
             amount=amount,
-            customer_name="Test Customer"
+            customer_name="Test Customer",
         )
-        
-        return result
 
 
 def main():
