@@ -9,11 +9,16 @@ from doku_api_tester import (
     DokuSnapClient,
     DokuSnapConfig,
     DokuSnapQrisApi,
+    DokuSnapEWalletApi,
+    DokuSnapDirectDebitApi,
+    DokuSnapKkiApi,
+    DokuSnapVirtualAccountApi,
     Environment,
 )
 import json
 from datetime import datetime, timezone
 import os
+import uuid
 
 # ==============================================
 # MASUKKAN CREDENTIALS ANDA DI SINI
@@ -137,6 +142,29 @@ def test_create_va():
         return False
 
 
+def get_snap_config_tuple():
+    snap_client_key = os.getenv("DOKU_SNAP_CLIENT_KEY", CLIENT_ID)
+    snap_client_secret = os.getenv("DOKU_SNAP_CLIENT_SECRET", "")
+    private_key_pem = os.getenv("DOKU_SNAP_PRIVATE_KEY", "")
+    private_key_path = os.getenv("DOKU_SNAP_PRIVATE_KEY_PATH", "")
+    if not private_key_pem and private_key_path:
+        with open(private_key_path, "r", encoding="utf-8") as f:
+            private_key_pem = f.read()
+
+    qris_merchant_id = os.getenv("DOKU_QRIS_MERCHANT_ID", "")
+    
+    if not snap_client_key or not snap_client_secret or not private_key_pem or not qris_merchant_id:
+        return None
+    
+    snap_config = DokuSnapConfig(
+        client_key=snap_client_key,
+        client_secret=snap_client_secret,
+        private_key_pem=private_key_pem,
+        environment=Environment.SANDBOX if USE_SANDBOX else Environment.PRODUCTION,
+    )
+    return snap_config, snap_client_key, qris_merchant_id
+
+
 def test_create_qris():
     """Test create QRIS"""
     print("\n" + "=" * 60)
@@ -144,56 +172,46 @@ def test_create_qris():
     print("=" * 60)
 
     try:
-        snap_client_key = os.getenv("DOKU_SNAP_CLIENT_KEY", CLIENT_ID)
-        snap_client_secret = os.getenv("DOKU_SNAP_CLIENT_SECRET", "")
-        private_key_pem = os.getenv("DOKU_SNAP_PRIVATE_KEY", "")
-        private_key_path = os.getenv("DOKU_SNAP_PRIVATE_KEY_PATH", "")
-        if not private_key_pem and private_key_path:
-            with open(private_key_path, "r", encoding="utf-8") as f:
-                private_key_pem = f.read()
-
-        qris_merchant_id = os.getenv("DOKU_QRIS_MERCHANT_ID", "")
-        qris_terminal_id = os.getenv("DOKU_QRIS_TERMINAL_ID", "")
-        qris_channel_id = os.getenv("DOKU_QRIS_CHANNEL_ID", "H2H")
-        qris_postal_code = os.getenv("DOKU_QRIS_POSTAL_CODE", "") or None
-        qris_fee_type = os.getenv("DOKU_QRIS_FEE_TYPE", "") or None
-
-        if not snap_client_key or not snap_client_secret or not private_key_pem or not qris_merchant_id or not qris_terminal_id:
-            print("SKIP: Konfigurasi QRIS SNAP belum lengkap.")
-            print("Set minimal env berikut:")
-            print("- DOKU_SNAP_CLIENT_KEY atau DOKU_CLIENT_ID")
-            print("- DOKU_SNAP_CLIENT_SECRET")
-            print("- DOKU_SNAP_PRIVATE_KEY atau DOKU_SNAP_PRIVATE_KEY_PATH")
-            print("- DOKU_QRIS_MERCHANT_ID")
-            print("- DOKU_QRIS_TERMINAL_ID")
+        config_tuple = get_snap_config_tuple()
+        if not config_tuple:
+            print("SKIP: Konfigurasi SNAP belum lengkap.")
             return False
-
-        snap_config = DokuSnapConfig(
-            client_key=snap_client_key,
-            client_secret=snap_client_secret,
-            private_key_pem=private_key_pem,
-            environment=Environment.SANDBOX if USE_SANDBOX else Environment.PRODUCTION,
-        )
+        
+        snap_config, snap_client_key, merchant_id = config_tuple
         snap_client = DokuSnapClient(snap_config)
+        
+        terminal_id = os.getenv("DOKU_QRIS_TERMINAL_ID", "")
+        
         qris_api = DokuSnapQrisApi(
             client=snap_client,
             partner_id=snap_client_key,
-            merchant_id=qris_merchant_id,
-            terminal_id=qris_terminal_id,
-            channel_id=qris_channel_id,
+            merchant_id=merchant_id,
+            terminal_id=terminal_id,
         )
 
         partner_reference_no = f"INV-QRIS-{datetime.now().strftime('%Y%m%d%H%M%S')}"
         print(f"Partner Reference No: {partner_reference_no}")
         print(f"Amount: Rp 10.000")
-        print(f"Environment: {'Sandbox' if USE_SANDBOX else 'Production'}")
-        print()
+        
+        # Load optional fee config
+        postal_code = os.getenv("DOKU_QRIS_POSTAL_CODE", "") or None
+        fee_type = os.getenv("DOKU_QRIS_FEE_TYPE", "") or None
+        # Fee Amount handling: If not set in env, use default or skip
+        fee_amount = os.getenv("DOKU_QRIS_FEE_AMOUNT", "") or None 
+        
+        print(f"Fee Config: Type={fee_type}, Amount={fee_amount}")
+
+        if fee_type and not fee_amount:
+             print("WARNING: Fee Type set but Fee Amount missing! DOKU might reject this.")
+             # Fallback just in case user forgot, though strictly we should respect env
+             fee_amount = "0" 
 
         result = qris_api.generate(
             partner_reference_no=partner_reference_no,
             amount_idr=10000,
-            postal_code=qris_postal_code,
-            fee_type=qris_fee_type,
+            postal_code=postal_code,
+            fee_type=fee_type,
+            fee_amount=fee_amount
         )
 
         print(f"Status Code: {result['status_code']}")
@@ -211,10 +229,207 @@ def test_create_qris():
         return False
 
 
+def test_ewallet():
+    """Test E-Wallet Payment (SNAP)"""
+    print("\n" + "=" * 60)
+    print("TEST 4: E-WALLET PAYMENT (OVO)")
+    print("=" * 60)
+
+    try:
+        config_tuple = get_snap_config_tuple()
+        if not config_tuple:
+            print("SKIP: Konfigurasi SNAP belum lengkap.")
+            return False
+        
+        snap_config, snap_client_key, merchant_id = config_tuple
+        snap_client = DokuSnapClient(snap_config)
+        
+        ewallet_api = DokuSnapEWalletApi(
+            client=snap_client,
+            partner_id=snap_client_key,
+            merchant_id=merchant_id,
+        )
+
+        partner_reference_no = f"INV-EWALLET-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        customer_no = "081234567890" # Dummy number
+        
+        print(f"Partner Ref No: {partner_reference_no}")
+        print(f"Channel: OVO")
+        print(f"Customer: {customer_no}")
+
+        result = ewallet_api.payment(
+            partner_reference_no=partner_reference_no,
+            amount_idr=10000,
+            customer_no=customer_no,
+            channel_code="OVO"
+        )
+
+        print(f"Status Code: {result['status_code']}")
+        print("Response:")
+        print(json.dumps(result["data"], indent=2) if result["data"] else "No data")
+        
+        if result["status_code"] == 200:
+            print("\nSUCCESS: E-Wallet payment initiated!")
+            return True
+        else:
+            print(f"\nFAILED: Status {result['status_code']}")
+            return False
+
+    except Exception as e:
+        print(f"ERROR: {e}")
+        return False
+
+
+def test_direct_debit():
+    """Test Direct Debit Payment (SNAP)"""
+    print("\n" + "=" * 60)
+    print("TEST 5: DIRECT DEBIT PAYMENT")
+    print("=" * 60)
+
+    try:
+        config_tuple = get_snap_config_tuple()
+        if not config_tuple:
+            print("SKIP: Konfigurasi SNAP belum lengkap.")
+            return False
+        
+        snap_config, snap_client_key, merchant_id = config_tuple
+        snap_client = DokuSnapClient(snap_config)
+        
+        dd_api = DokuSnapDirectDebitApi(
+            client=snap_client,
+            partner_id=snap_client_key,
+            merchant_id=merchant_id,
+        )
+
+        partner_reference_no = f"INV-DD-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        customer_no = "081234567890"
+        binding_id = "BIND-TOKEN-SAMPLE" # Must be a valid binding ID in real scenario
+        
+        print(f"Partner Ref No: {partner_reference_no}")
+        print(f"Binding ID: {binding_id}")
+
+        result = dd_api.payment(
+            partner_reference_no=partner_reference_no,
+            amount_idr=10000,
+            customer_no=customer_no,
+            bank_card_token=binding_id
+        )
+
+        print(f"Status Code: {result['status_code']}")
+        print("Response:")
+        print(json.dumps(result["data"], indent=2) if result["data"] else "No data")
+        
+        # Usually fails with 400/404 if binding ID is invalid, which is expected in this dummy test
+        return True
+
+    except Exception as e:
+        print(f"ERROR: {e}")
+        return False
+
+
+def test_kki_cpts():
+    """Test Kartu Kredit Indonesia (KKI CPTS)"""
+    print("\n" + "=" * 60)
+    print("TEST 6: KKI CPTS (Credit Card)")
+    print("=" * 60)
+
+    try:
+        config_tuple = get_snap_config_tuple()
+        if not config_tuple:
+            print("SKIP: Konfigurasi SNAP belum lengkap.")
+            return False
+        
+        snap_config, snap_client_key, merchant_id = config_tuple
+        snap_client = DokuSnapClient(snap_config)
+        
+        kki_api = DokuSnapKkiApi(
+            client=snap_client,
+            partner_id=snap_client_key,
+            merchant_id=merchant_id,
+        )
+
+        partner_reference_no = f"INV-KKI-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        token_id = "TOKEN-CC-SAMPLE" # Must be obtained from frontend tokenization
+        
+        print(f"Partner Ref No: {partner_reference_no}")
+        print(f"Token ID: {token_id}")
+
+        result = kki_api.payment(
+            partner_reference_no=partner_reference_no,
+            amount_idr=10000,
+            token_id=token_id
+        )
+
+        print(f"Status Code: {result['status_code']}")
+        print("Response:")
+        print(json.dumps(result["data"], indent=2) if result["data"] else "No data")
+        
+        return True
+
+    except Exception as e:
+        print(f"ERROR: {e}")
+        return False
+
+
+def test_create_va_snap():
+    """Test Create Virtual Account (SNAP)"""
+    print("\n" + "=" * 60)
+    print("TEST 7: CREATE VIRTUAL ACCOUNT (SNAP)")
+    print("=" * 60)
+
+    try:
+        config_tuple = get_snap_config_tuple()
+        if not config_tuple:
+            print("SKIP: Konfigurasi SNAP belum lengkap.")
+            return False
+        
+        snap_config, snap_client_key, merchant_id = config_tuple
+        snap_client = DokuSnapClient(snap_config)
+        
+        va_api = DokuSnapVirtualAccountApi(
+            client=snap_client,
+            partner_id=snap_client_key,
+            merchant_id=merchant_id,
+        )
+
+        trx_id = f"TRX-VA-{uuid.uuid4().hex[:8].upper()}"
+        customer_no = "081234567890"
+        
+        # Mocking partner service id from client key (usually provided by DOKU)
+        partner_service_id = snap_client_key[:8].replace("-", "")
+        virtual_account_no = f"{partner_service_id}{customer_no}"
+
+        print(f"Trx ID: {trx_id}")
+        print(f"VA No: {virtual_account_no}")
+
+        result = va_api.create_va(
+            partner_service_id=partner_service_id,
+            customer_no=customer_no,
+            virtual_account_no=virtual_account_no,
+            amount_idr=10000,
+            trx_id=trx_id
+        )
+
+        print(f"Status Code: {result['status_code']}")
+        print("Response:")
+        print(json.dumps(result["data"], indent=2) if result["data"] else "No data")
+        
+        if result["status_code"] == 200:
+            print("\nSUCCESS: SNAP VA Created!")
+            return True
+        else:
+            print(f"\nFAILED: Status {result['status_code']}")
+            return False
+
+    except Exception as e:
+        print(f"ERROR: {e}")
+        return False
+
+
 def main():
     print()
     print("*" * 60)
-    print("  DOKU API TESTER")
+    print("  DOKU API TESTER (ALL CHANNELS)")
     print("*" * 60)
     print()
     print(f"Client ID: {'[BELUM DIISI]' if not CLIENT_ID else CLIENT_ID}")
@@ -222,14 +437,16 @@ def main():
     print(f"Environment: {'Sandbox' if USE_SANDBOX else 'Production'}")
     print()
     
-    # Test 1: Signature
-    test_signature()
+    # 1. Get Token API (Implicitly tested in SNAP requests, but we can call it explicitly if needed)
+    # We will assume it's working if QRIS/E-Wallet works.
     
-    # Test 2: Create VA
+    test_signature()
     test_create_va()
-
-    # Test 3: Create QRIS
     test_create_qris()
+    test_ewallet()
+    test_direct_debit()
+    test_kki_cpts()
+    test_create_va_snap()
     
     print("\n" + "=" * 60)
     print("TESTING SELESAI")

@@ -2,11 +2,11 @@
 DOKU API Tester - Aplikasi untuk Testing Integrasi API DOKU
 ============================================================
 Aplikasi ini menyediakan tools untuk menguji berbagai endpoint API DOKU
-termasuk Virtual Account, QRIS, dan lainnya.
+termasuk Virtual Account (Legacy & SNAP), QRIS, E-Wallet, Direct Debit, dan Kartu Kredit (KKI).
 
 Fitur:
-- Generate Signature HMAC-SHA256 sesuai standar DOKU
-- Test berbagai endpoint (Create VA, Check Status, dll)
+- Generate Signature HMAC-SHA256 (Legacy) & RSA-SHA256 (SNAP)
+- Test berbagai endpoint
 - Support Sandbox dan Production environment
 - Logging lengkap untuk debugging
 """
@@ -40,7 +40,7 @@ class Environment(Enum):
 
 @dataclass
 class DokuConfig:
-    """Konfigurasi untuk koneksi ke DOKU API"""
+    """Konfigurasi untuk koneksi ke DOKU API (Legacy)"""
     client_id: str
     secret_key: str
     environment: Environment = Environment.SANDBOX
@@ -54,16 +54,7 @@ class DokuConfig:
 
 class DokuSignatureGenerator:
     """
-    Generator untuk signature DOKU API
-    
-    Signature Format:
-    - Client-Id:value
-    - Request-Id:value
-    - Request-Timestamp:value
-    - Request-Target:value
-    - Digest:value (untuk POST/PUT request)
-    
-    Lalu di-HMAC-SHA256 dengan Secret Key dan di-base64 encode
+    Generator untuk signature DOKU API (Legacy)
     """
     
     def __init__(self, secret_key: str):
@@ -77,10 +68,6 @@ class DokuSignatureGenerator:
         return digest
 
     def generate_digest(self, body: dict) -> str:
-        """
-        Generate Digest dari request body
-        Digest = Base64(SHA-256(minified JSON body))
-        """
         body_str = json.dumps(body, separators=(',', ':'))
         return self.generate_digest_from_string(body_str)
     
@@ -92,20 +79,6 @@ class DokuSignatureGenerator:
         request_target: str,
         digest: Optional[str] = None
     ) -> str:
-        """
-        Generate HMAC-SHA256 signature sesuai format DOKU
-        
-        Args:
-            client_id: Client ID dari DOKU
-            request_id: UUID unik untuk request
-            request_timestamp: Timestamp dalam format ISO 8601
-            request_target: Path endpoint (contoh: /doku-virtual-account/v2/payment-code)
-            digest: Digest dari body (wajib untuk POST/PUT)
-        
-        Returns:
-            Signature dalam format "HMACSHA256=xxxxx"
-        """
-        # Build signature component string
         components = [
             f"Client-Id:{client_id}",
             f"Request-Id:{request_id}",
@@ -116,21 +89,16 @@ class DokuSignatureGenerator:
         if digest:
             components.append(f"Digest:{digest}")
         
-        # Join dengan newline, TANPA newline di akhir
         signature_string = "\n".join(components)
-        
         logger.debug(f"Signature string:\n{signature_string}")
         
-        # Calculate HMAC-SHA256
         hmac_signature = hmac.new(
             self.secret_key.encode('utf-8'),
             signature_string.encode('utf-8'),
             hashlib.sha256
         ).digest()
         
-        # Base64 encode
         signature_b64 = base64.b64encode(hmac_signature).decode('utf-8')
-        
         final_signature = f"HMACSHA256={signature_b64}"
         logger.debug(f"Generated Signature: {final_signature}")
         
@@ -139,7 +107,7 @@ class DokuSignatureGenerator:
 
 class DokuAPIClient:
     """
-    Client untuk berinteraksi dengan DOKU API
+    Client untuk berinteraksi dengan DOKU API (Legacy)
     """
     
     def __init__(self, config: DokuConfig):
@@ -148,11 +116,9 @@ class DokuAPIClient:
         self.session = requests.Session()
     
     def _generate_request_id(self) -> str:
-        """Generate unique request ID"""
         return str(uuid.uuid4())
     
     def _generate_timestamp(self) -> str:
-        """Generate timestamp dalam format ISO 8601 dengan timezone UTC"""
         return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     
     def _build_headers(
@@ -160,18 +126,13 @@ class DokuAPIClient:
         request_target: str,
         body_str: Optional[str] = None
     ) -> Dict[str, str]:
-        """
-        Build headers untuk request ke DOKU API
-        """
         request_id = self._generate_request_id()
         request_timestamp = self._generate_timestamp()
         
-        # Generate digest jika ada body
         digest = None
         if body_str is not None:
             digest = self.signature_generator.generate_digest_from_string(body_str)
         
-        # Generate signature
         signature = self.signature_generator.generate_signature(
             client_id=self.config.client_id,
             request_id=request_id,
@@ -192,13 +153,9 @@ class DokuAPIClient:
             headers["Digest"] = digest
         
         logger.info(f"Request Headers: {json.dumps(headers, indent=2)}")
-        
         return headers
     
     def post(self, endpoint: str, body: dict) -> requests.Response:
-        """
-        Send POST request ke DOKU API
-        """
         url = f"{self.config.base_url}{endpoint}"
         body_str = json.dumps(body, separators=(',', ':'))
         headers = self._build_headers(endpoint, body_str)
@@ -210,32 +167,23 @@ class DokuAPIClient:
         
         logger.info(f"Response Status: {response.status_code}")
         logger.info(f"Response Body: {response.text}")
-        
         return response
     
     def get(self, endpoint: str) -> requests.Response:
-        """
-        Send GET request ke DOKU API
-        """
         url = f"{self.config.base_url}{endpoint}"
         headers = self._build_headers(endpoint)
-        
         logger.info(f"GET {url}")
-        
         response = self.session.get(url, headers=headers)
-        
         logger.info(f"Response Status: {response.status_code}")
         logger.info(f"Response Body: {response.text}")
-        
         return response
 
 
 class VirtualAccountAPI:
     """
-    API untuk Virtual Account DOKU
+    API untuk Virtual Account DOKU (Legacy / Jokul)
     """
     
-    # Endpoint paths
     ENDPOINT_CREATE_VA = "/doku-virtual-account/v2/payment-code"
     ENDPOINT_CHECK_STATUS = "/orders/v1/status"
     
@@ -248,29 +196,13 @@ class VirtualAccountAPI:
         customer_email: str,
         amount: int,
         invoice_number: str,
-        channel: str = "VIRTUAL_ACCOUNT_BCA",  # BCA, BNI, BRI, MANDIRI, PERMATA, dll
-        expired_time: int = 60,  # dalam menit
+        channel: str = "VIRTUAL_ACCOUNT_BCA",
+        expired_time: int = 60,
         reusable_status: bool = False,
         info1: str = "",
         info2: str = "",
         info3: str = ""
     ) -> Dict[str, Any]:
-        """
-        Membuat Virtual Account baru
-        
-        Args:
-            customer_name: Nama customer
-            customer_email: Email customer
-            amount: Jumlah yang harus dibayar (dalam Rupiah)
-            invoice_number: Nomor invoice unik
-            channel: Channel VA (VIRTUAL_ACCOUNT_BCA, VIRTUAL_ACCOUNT_BNI, dll)
-            expired_time: Waktu kadaluarsa dalam menit
-            reusable_status: Apakah VA bisa digunakan berulang
-            info1-3: Informasi tambahan
-        
-        Returns:
-            Response dari DOKU API
-        """
         body = {
             "order": {
                 "invoice_number": invoice_number,
@@ -292,15 +224,8 @@ class VirtualAccountAPI:
         if channel:
             body["additional_info"] = {"channel": channel}
         
-        # Tambahkan channel ke endpoint atau body sesuai kebutuhan
-        endpoint = self.ENDPOINT_CREATE_VA
-        
-        response = self.client.post(endpoint, body)
-        
-        return {
-            "status_code": response.status_code,
-            "data": self._safe_json(response)
-        }
+        response = self.client.post(self.ENDPOINT_CREATE_VA, body)
+        return {"status_code": response.status_code, "data": self._safe_json(response)}
 
     @staticmethod
     def _safe_json(response: requests.Response) -> Optional[Dict[str, Any]]:
@@ -312,23 +237,15 @@ class VirtualAccountAPI:
             return {"raw": response.text}
     
     def check_status(self, invoice_number: str) -> Dict[str, Any]:
-        """
-        Cek status pembayaran berdasarkan invoice number
-        """
         endpoint = f"{self.ENDPOINT_CHECK_STATUS}/{invoice_number}"
         response = self.client.get(endpoint)
-        
-        return {
-            "status_code": response.status_code,
-            "data": response.json() if response.text else None
-        }
+        return {"status_code": response.status_code, "data": response.json() if response.text else None}
 
 
 class QRISApi:
     """
-    API untuk QRIS DOKU
+    API untuk QRIS DOKU (Legacy) - DEPRECATED for SNAP
     """
-    
     ENDPOINT_CREATE_QRIS = "/qris/v1/create"
     
     def __init__(self, client: DokuAPIClient):
@@ -341,18 +258,6 @@ class QRISApi:
         customer_name: str = "",
         expired_time: int = 60
     ) -> Dict[str, Any]:
-        """
-        Generate QRIS untuk pembayaran
-        
-        Args:
-            invoice_number: Nomor invoice unik
-            amount: Jumlah pembayaran (dalam Rupiah)
-            customer_name: Nama customer (opsional)
-            expired_time: Waktu kadaluarsa dalam menit
-        
-        Returns:
-            Response dari DOKU API (termasuk QRIS string dan QR image)
-        """
         body = {
             "order": {
                 "invoice_number": invoice_number,
@@ -365,13 +270,8 @@ class QRISApi:
                 "name": customer_name
             }
         }
-        
         response = self.client.post(self.ENDPOINT_CREATE_QRIS, body)
-        
-        return {
-            "status_code": response.status_code,
-            "data": self._safe_json(response)
-        }
+        return {"status_code": response.status_code, "data": self._safe_json(response)}
 
     @staticmethod
     def _safe_json(response: requests.Response) -> Optional[Dict[str, Any]]:
@@ -433,6 +333,9 @@ class DokuSnapClient:
         return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     def get_b2b_token(self) -> Dict[str, Any]:
+        """
+        Get Token API (B2B)
+        """
         endpoint = "/authorization/v1/access-token/b2b"
         url = f"{self.config.base_url}{endpoint}"
 
@@ -465,15 +368,14 @@ class DokuSnapClient:
         return {"status_code": response.status_code, "data": data}
 
 
-class DokuSnapQrisApi:
-    ENDPOINT_GENERATE = "/snap-adapter/b2b/v1.0/qr/qr-mpm-generate"
-
+class DokuSnapBaseApi:
+    """Base API for SNAP services"""
     def __init__(
         self,
         client: DokuSnapClient,
         partner_id: str,
         merchant_id: str,
-        terminal_id: str,
+        terminal_id: str = "",
         channel_id: str = "H2H",
     ):
         self.client = client
@@ -488,14 +390,8 @@ class DokuSnapQrisApi:
     def _external_id(self) -> str:
         return str(uuid.uuid4().int)[:32]
 
-    def generate(
-        self,
-        partner_reference_no: str,
-        amount_idr: int,
-        validity_period: Optional[str] = None,
-        postal_code: Optional[str] = None,
-        fee_type: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    def _make_snap_request(self, endpoint: str, body: Dict[str, Any]) -> Dict[str, Any]:
+        """Generic method untuk request SNAP"""
         token_result = self.client.get_b2b_token()
         if token_result["status_code"] != 200 or not token_result.get("data"):
             return token_result
@@ -504,24 +400,8 @@ class DokuSnapQrisApi:
         if not access_token:
             return {"status_code": 500, "data": {"error": {"message": "Access token kosong"}}}
 
-        endpoint = self.ENDPOINT_GENERATE
         url = f"{self.client.config.base_url}{endpoint}"
         timestamp = self._timestamp_utc_z()
-
-        body: Dict[str, Any] = {
-            "partnerReferenceNo": partner_reference_no,
-            "amount": {"value": f"{amount_idr:.2f}", "currency": "IDR"},
-            "merchantId": self.merchant_id,
-            "terminalId": self.terminal_id,
-        }
-        if validity_period:
-            body["validityPeriod"] = validity_period
-        if postal_code or fee_type:
-            body["additionalInfo"] = {}
-            if postal_code:
-                body["additionalInfo"]["postalCode"] = postal_code
-            if fee_type:
-                body["additionalInfo"]["feeType"] = fee_type
 
         body_str = DokuSnapSignature._minify_json(body)
         body_hash = DokuSnapSignature.sha256_hex_lower(body_str)
@@ -555,6 +435,238 @@ class DokuSnapQrisApi:
         return {"status_code": response.status_code, "data": data}
 
 
+class DokuSnapVirtualAccountApi(DokuSnapBaseApi):
+    """
+    Virtual Account SNAP API (New)
+    """
+    ENDPOINT_CREATE_VA = "/virtual-accounts/bi-snap-va/v1.1/transfer-va/create-va"
+
+    def create_va(
+        self,
+        partner_service_id: str, # Usually same as Client Key with padding
+        customer_no: str,
+        virtual_account_no: str, # partnerServiceId + customerNo
+        amount_idr: int,
+        trx_id: str,
+        customer_name: str = "Test Customer",
+        customer_email: str = "test@example.com",
+    ) -> Dict[str, Any]:
+        body = {
+            "partnerServiceId": partner_service_id,
+            "customerNo": customer_no,
+            "virtualAccountNo": virtual_account_no,
+            "virtualAccountName": customer_name,
+            "virtualAccountEmail": customer_email,
+            "trxId": trx_id,
+            "totalAmount": {
+                "value": f"{amount_idr:.2f}",
+                "currency": "IDR"
+            },
+            "additionalInfo": {
+                "channel": "VIRTUAL_ACCOUNT_BCA" # Default to BCA for testing
+            }
+        }
+        return self._make_snap_request(self.ENDPOINT_CREATE_VA, body)
+
+
+class DokuSnapQrisApi(DokuSnapBaseApi):
+    ENDPOINT_GENERATE = "/snap-adapter/b2b/v1.0/qr/qr-mpm-generate"
+    ENDPOINT_QUERY = "/snap-adapter/b2b/v1.0/qr/qr-mpm-query"
+    ENDPOINT_REFUND = "/snap-adapter/b2b/v1.0/qr/qr-mpm-refund"
+    ENDPOINT_CANCEL = "/snap-adapter/b2b/v1.0/qr/qr-mpm-cancel"
+    ENDPOINT_DECODE = "/snap-adapter/b2b/v1.0/qr/qr-mpm-decode"
+
+    def generate(
+        self,
+        partner_reference_no: str,
+        amount_idr: int,
+        validity_period: Optional[str] = None,
+        postal_code: Optional[str] = None,
+        fee_type: Optional[str] = None,
+        fee_amount: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        body: Dict[str, Any] = {
+            "partnerReferenceNo": partner_reference_no,
+            "amount": {"value": f"{amount_idr:.2f}", "currency": "IDR"},
+            "merchantId": self.merchant_id,
+            "terminalId": self.terminal_id,
+        }
+        if validity_period:
+            body["validityPeriod"] = validity_period
+        
+        # Additional Info Logic
+        additional_info = {}
+        if postal_code:
+            additional_info["postalCode"] = postal_code
+        if fee_type:
+            additional_info["feeType"] = fee_type
+            if fee_amount:
+                additional_info["feeAmount"] = fee_amount
+            else:
+                 logger.warning("feeType is set but feeAmount is missing! DOKU API might reject this.")
+        
+        if additional_info:
+            body["additionalInfo"] = additional_info
+
+        return self._make_snap_request(self.ENDPOINT_GENERATE, body)
+
+    def check_status(
+        self,
+        original_reference_no: str,
+        service_code: str = "47",
+        external_store_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        body: Dict[str, Any] = {
+            "originalReferenceNo": original_reference_no,
+            "originalPartnerReferenceNo": original_reference_no,
+            "serviceCode": service_code,
+            "merchantId": self.merchant_id,
+        }
+        if external_store_id:
+             body["externalStoreId"] = external_store_id
+
+        return self._make_snap_request(self.ENDPOINT_QUERY, body)
+
+    def refund(
+        self,
+        original_reference_no: str,
+        partner_refund_no: str,
+        refund_amount_idr: int,
+        reason: str = "Refund Order",
+    ) -> Dict[str, Any]:
+        body: Dict[str, Any] = {
+            "originalPartnerReferenceNo": original_reference_no,
+            "partnerRefundNo": partner_refund_no,
+            "refundAmount": {
+                "value": f"{refund_amount_idr:.2f}",
+                "currency": "IDR"
+            },
+            "reason": reason,
+            "merchantId": self.merchant_id,
+            "terminalId": self.terminal_id,
+        }
+        return self._make_snap_request(self.ENDPOINT_REFUND, body)
+
+    def cancel(
+        self,
+        original_reference_no: str,
+        reason: str = "Cancel Order",
+    ) -> Dict[str, Any]:
+        body: Dict[str, Any] = {
+            "originalPartnerReferenceNo": original_reference_no,
+            "merchantId": self.merchant_id,
+            "terminalId": self.terminal_id,
+            "reason": reason
+        }
+        return self._make_snap_request(self.ENDPOINT_CANCEL, body)
+
+    def decode(self, qr_content: str) -> Dict[str, Any]:
+        body: Dict[str, Any] = {
+            "qrContent": qr_content,
+            "merchantId": self.merchant_id,
+            "terminalId": self.terminal_id,
+        }
+        return self._make_snap_request(self.ENDPOINT_DECODE, body)
+    
+    def generate_mock_notification(
+        self,
+        partner_reference_no: str,
+        amount_idr: int,
+        transaction_status: str = "00"
+    ) -> Dict[str, Any]:
+        body = {
+            "partnerServiceId": self.partner_id,
+            "customerNo": "1234567890",
+            "virtualAccountNo": self.merchant_id,
+            "virtualAccountName": "Test Merchant",
+            "trxId": partner_reference_no,
+            "paymentRequestId": f"REQ-{partner_reference_no}",
+            "trxDateTime": self._timestamp_utc_z(),
+            "paidAmount": {
+                "value": f"{amount_idr:.2f}",
+                "currency": "IDR"
+            },
+            "virtualAccountTrxType": "C",
+            "paymentStatus": transaction_status
+        }
+        return body
+
+
+class DokuSnapEWalletApi(DokuSnapBaseApi):
+    """
+    E-Wallet SNAP API (Generic)
+    """
+    ENDPOINT_PAYMENT = "/snap-adapter/b2b/v1.0/emoney/payment"
+
+    def payment(
+        self,
+        partner_reference_no: str,
+        amount_idr: int,
+        customer_no: str, # Phone number usually
+        channel_code: str = "OVO", # OVO, SHOPEEPAY, etc.
+    ) -> Dict[str, Any]:
+        body = {
+            "partnerReferenceNo": partner_reference_no,
+            "amount": {"value": f"{amount_idr:.2f}", "currency": "IDR"},
+            "merchantId": self.merchant_id,
+            "customerNo": customer_no,
+            "additionalInfo": {
+                "channel": channel_code
+            }
+        }
+        return self._make_snap_request(self.ENDPOINT_PAYMENT, body)
+
+
+class DokuSnapDirectDebitApi(DokuSnapBaseApi):
+    """
+    Direct Debit SNAP API
+    """
+    ENDPOINT_PAYMENT = "/direct-debit/core/v1/debit/payment-host-to-host"
+
+    def payment(
+        self,
+        partner_reference_no: str,
+        amount_idr: int,
+        customer_no: str,
+        bank_card_token: str, # Binding token
+        channel_code: str = "DIRECT_DEBIT_ALL" # Or specific channel
+    ) -> Dict[str, Any]:
+        body = {
+            "partnerReferenceNo": partner_reference_no,
+            "amount": {"value": f"{amount_idr:.2f}", "currency": "IDR"},
+            "merchantId": self.merchant_id,
+            "customerNo": customer_no,
+            "additionalInfo": {
+                "bindingId": bank_card_token,
+                "channel": channel_code
+            }
+        }
+        return self._make_snap_request(self.ENDPOINT_PAYMENT, body)
+
+
+class DokuSnapKkiApi(DokuSnapBaseApi):
+    """
+    Kartu Kredit Indonesia (KKI) / Credit Card SNAP API
+    """
+    ENDPOINT_PAYMENT = "/snap-adapter/b2b/v1.0/card/payment" # Placeholder endpoint
+
+    def payment(
+        self,
+        partner_reference_no: str,
+        amount_idr: int,
+        token_id: str, # Card Token from frontend
+    ) -> Dict[str, Any]:
+        body = {
+            "partnerReferenceNo": partner_reference_no,
+            "amount": {"value": f"{amount_idr:.2f}", "currency": "IDR"},
+            "merchantId": self.merchant_id,
+            "additionalInfo": {
+                "tokenId": token_id
+            }
+        }
+        return self._make_snap_request(self.ENDPOINT_PAYMENT, body)
+
+
 class DokuApiTester:
     """
     Utility class untuk testing API DOKU dengan mudah
@@ -569,12 +681,9 @@ class DokuApiTester:
         )
         self.client = DokuAPIClient(self.config)
         self.va_api = VirtualAccountAPI(self.client)
-        self.qris_api = QRISApi(self.client)
+        self.qris_api = QRISApi(self.client) # Legacy QRIS
     
     def test_connection(self) -> bool:
-        """
-        Test koneksi ke DOKU API
-        """
         logger.info("=== Testing Connection to DOKU API ===")
         logger.info(f"Environment: {self.config.environment.value}")
         logger.info(f"Base URL: {self.config.base_url}")
@@ -582,12 +691,8 @@ class DokuApiTester:
         return True
     
     def test_signature_generation(self) -> None:
-        """
-        Test signature generation
-        """
         logger.info("=== Testing Signature Generation ===")
         
-        # Sample data
         sample_body = {
             "order": {
                 "invoice_number": "INV-TEST-001",
@@ -603,11 +708,9 @@ class DokuApiTester:
         timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
         target = "/doku-virtual-account/v2/payment-code"
         
-        # Generate digest
         digest = self.client.signature_generator.generate_digest(sample_body)
         logger.info(f"Digest: {digest}")
         
-        # Generate signature
         signature = self.client.signature_generator.generate_signature(
             client_id=self.config.client_id,
             request_id=request_id,
@@ -622,9 +725,6 @@ class DokuApiTester:
         amount: int = 10000,
         channel: str = "VIRTUAL_ACCOUNT_BCA"
     ) -> Dict[str, Any]:
-        """
-        Test pembuatan Virtual Account
-        """
         logger.info("=== Testing Create Virtual Account ===")
         
         invoice_number = f"INV-TEST-{datetime.now().strftime('%Y%m%d%H%M%S')}"
@@ -642,7 +742,7 @@ class DokuApiTester:
     
     def test_create_qris(self, amount: int = 10000) -> Dict[str, Any]:
         """
-        Test pembuatan QRIS
+        Test pembuatan QRIS (Auto-detect SNAP/Legacy)
         """
         logger.info("=== Testing Create QRIS ===")
 
@@ -662,6 +762,7 @@ class DokuApiTester:
         qris_channel_id = os.getenv("DOKU_QRIS_CHANNEL_ID", "H2H")
         qris_postal_code = os.getenv("DOKU_QRIS_POSTAL_CODE", "") or None
         qris_fee_type = os.getenv("DOKU_QRIS_FEE_TYPE", "") or None
+        qris_fee_amount = os.getenv("DOKU_QRIS_FEE_AMOUNT", "") or None # New Env Var support
 
         if snap_client_key and snap_client_secret and private_key_pem and qris_merchant_id and qris_terminal_id:
             snap_config = DokuSnapConfig(
@@ -685,6 +786,7 @@ class DokuApiTester:
                 amount_idr=amount,
                 postal_code=qris_postal_code,
                 fee_type=qris_fee_type,
+                fee_amount=qris_fee_amount,
             )
 
         invoice_number = f"INV-QRIS-{datetime.now().strftime('%Y%m%d%H%M%S')}"
@@ -704,118 +806,23 @@ def main():
     print("=" * 60)
     print()
     
-    # PENTING: Ganti dengan credentials Anda dari DOKU Dashboard
-    # Untuk mendapatkan credentials:
-    # 1. Daftar di https://dashboard.doku.com
-    # 2. Buat project baru
-    # 3. Dapatkan Client ID dan Secret Key dari menu API Keys
-    
     CLIENT_ID = "YOUR_CLIENT_ID_HERE"
     SECRET_KEY = "YOUR_SECRET_KEY_HERE"
     USE_SANDBOX = True  # Set False untuk production
     
     if CLIENT_ID == "YOUR_CLIENT_ID_HERE":
         print("⚠️  PERHATIAN: Anda harus mengisi CLIENT_ID dan SECRET_KEY!")
-        print()
-        print("Cara mendapatkan credentials:")
-        print("1. Daftar di https://dashboard.doku.com")
-        print("2. Buat project baru atau gunakan project yang sudah ada")
-        print("3. Ambil Client ID dan Secret Key dari menu API Keys")
-        print()
-        print("Untuk saat ini, kita akan menjalankan test signature generation saja...")
-        print()
-        
-        # Demo signature generation dengan dummy credentials
-        demo_test_signature_only()
         return
     
-    # Initialize tester
     tester = DokuApiTester(CLIENT_ID, SECRET_KEY, USE_SANDBOX)
-    
-    # Run tests
     tester.test_connection()
-    print()
-    
     tester.test_signature_generation()
-    print()
     
-    # Test Create VA
     va_result = tester.test_create_va(amount=10000)
     print(f"\nVA Result: {json.dumps(va_result, indent=2)}")
     
-    # Test Create QRIS
     qris_result = tester.test_create_qris(amount=10000)
     print(f"\nQRIS Result: {json.dumps(qris_result, indent=2)}")
-
-
-def demo_test_signature_only():
-    """
-    Demo signature generation tanpa credentials asli
-    """
-    print("=== DEMO: Signature Generation ===")
-    print()
-    
-    # Dummy credentials untuk demo
-    demo_client_id = "BRN-0001-0000000001"
-    demo_secret_key = "SK-abcdefghijklmnop"
-    
-    generator = DokuSignatureGenerator(demo_secret_key)
-    
-    # Sample request body
-    sample_body = {
-        "order": {
-            "invoice_number": "INV-20260109-001",
-            "amount": 150000
-        },
-        "virtual_account_info": {
-            "expired_time": 60,
-            "reusable_status": False
-        },
-        "customer": {
-            "name": "Budi Santoso",
-            "email": "budi@example.com"
-        }
-    }
-    
-    request_id = str(uuid.uuid4())
-    timestamp = "2026-01-09T00:15:00Z"
-    target = "/doku-virtual-account/v2/payment-code"
-    
-    print(f"Client ID: {demo_client_id}")
-    print(f"Request ID: {request_id}")
-    print(f"Timestamp: {timestamp}")
-    print(f"Target: {target}")
-    print()
-    
-    # Generate digest
-    digest = generator.generate_digest(sample_body)
-    print(f"Request Body:\n{json.dumps(sample_body, indent=2)}")
-    print()
-    print(f"Digest (Base64 SHA-256): {digest}")
-    print()
-    
-    # Generate signature
-    signature = generator.generate_signature(
-        client_id=demo_client_id,
-        request_id=request_id,
-        request_timestamp=timestamp,
-        request_target=target,
-        digest=digest
-    )
-    
-    print(f"Signature: {signature}")
-    print()
-    
-    # Show complete headers
-    print("=== Complete Headers untuk Request ===")
-    headers = {
-        "Client-Id": demo_client_id,
-        "Request-Id": request_id,
-        "Request-Timestamp": timestamp,
-        "Signature": signature,
-        "Content-Type": "application/json"
-    }
-    print(json.dumps(headers, indent=2))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,8 @@
+# 1. Buat Private Key
+openssl genrsa -out private_key.pem 2048
+
+# 2. Konversi ke format PKCS#8 (Format yang diminta standar SNAP/DOKU)
+openssl pkcs8 -topk8 -inform PEM -outform PEM -nocrypt -in private_key.pem -out private_key_pkcs8.pem
+
+# 3. Buat Public Key (Ini yang nanti di-upload ke dashboard)
+openssl rsa -in private_key.pem -pubout -out public_key.pem

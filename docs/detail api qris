@@ -1,0 +1,30 @@
+
+Tenang, gambar yang kamu lampirkan itu adalah alur hidup (lifecycle) sebuah transaksi QRIS dari sisi sistem. Mari kita bedah satu per satu dengan bahasa yang lebih manusiawi:
+
+1. Generate QRIS (Pemesanan)
+Ini adalah langkah pertama. Di sini sistem kamu mengirim data ke Doku (seperti jumlah nominal dan ID pesanan). Doku lalu membalas dengan memberikan kode QR (berupa string teks).
+
+Tugas kamu: Mengubah string itu jadi gambar QR agar bisa di-scan pelanggan.
+
+2. Query QRIS (Cek Status Manual)
+Terkadang, pelanggan sudah bayar tapi status di aplikasi kamu belum berubah. Fungsi ini digunakan server kamu untuk "bertanya" ke Doku: "Eh, pesanan nomor INV-123 ini sudah dibayar belum?"
+
+Kegunaan: Sebagai cadangan jika notifikasi otomatis terlambat masuk.
+
+3. Refund QRIS (Pengembalian Dana)
+Jika pelanggan membatalkan pesanan atau ada stok barang habis setelah mereka bayar, kamu menggunakan API ini untuk mengembalikan uang mereka.
+
+Catatan: Biasanya ada batas waktu tertentu (misal maksimal 7 hari setelah transaksi).
+
+4. Decode QRIS (Penerjemah Kode)
+Ini fitur khusus. Jika kamu punya sebuah kode QRIS (misal berupa gambar atau string), API ini akan "membongkar" isi kode tersebut.
+
+Outputnya: Kamu bisa tahu siapa pemilik QR-nya (Merchant Name), nominalnya berapa, dan lokasinya di mana.
+
+5. Payment QRIS (Eksekusi Pembayaran)
+Ini biasanya digunakan untuk model Customer Presented Mode (CPM). Jadi pelanggan yang menunjukkan kode QR di HP mereka, lalu kamu (merchant) yang melakukan scan. API ini yang mengeksekusi penarikan saldonya.
+
+6. Cancel QRIS (Pembatalan Kode)
+Jika pelanggan tidak jadi bayar dan kamu ingin kode QR yang sudah muncul itu tidak bisa dipakai lagi (mati), kamu panggil fungsi ini.
+
+Efeknya: Jika di-scan setelah di-cancel, aplikasi pembayaran akan memunculkan error "QR Expired" atau "Sudah Tidak Berlaku".
