@@ -165,6 +165,30 @@ def get_snap_config_tuple():
     return snap_config, snap_client_key, qris_merchant_id
 
 
+def test_get_token_api():
+    print("\n" + "=" * 60)
+    print("TEST 0: GET TOKEN API (B2B)")
+    print("=" * 60)
+
+    try:
+        config_tuple = get_snap_config_tuple()
+        if not config_tuple:
+            print("SKIP: Konfigurasi SNAP belum lengkap.")
+            return False
+
+        snap_config, _, _ = config_tuple
+        snap_client = DokuSnapClient(snap_config)
+        result = snap_client.get_b2b_token()
+
+        print(f"Status Code: {result['status_code']}")
+        print("Response:")
+        print(json.dumps(result["data"], indent=2) if result["data"] else "No data")
+        return result["status_code"] == 200
+    except Exception as e:
+        print(f"ERROR: {e}")
+        return False
+
+
 def test_create_qris():
     """Test create QRIS"""
     print("\n" + "=" * 60)
@@ -201,10 +225,9 @@ def test_create_qris():
         
         print(f"Fee Config: Type={fee_type}, Amount={fee_amount}")
 
-        if fee_type and not fee_amount:
-             print("WARNING: Fee Type set but Fee Amount missing! DOKU might reject this.")
-             # Fallback just in case user forgot, though strictly we should respect env
-             fee_amount = "0" 
+        if (fee_type or "").strip() == "2" and not (fee_amount or "").strip():
+            print("ERROR: DOKU_QRIS_FEE_TYPE=2 wajib ada DOKU_QRIS_FEE_AMOUNT")
+            return False
 
         result = qris_api.generate(
             partner_reference_no=partner_reference_no,
@@ -312,7 +335,8 @@ def test_direct_debit():
             partner_reference_no=partner_reference_no,
             amount_idr=10000,
             customer_no=customer_no,
-            bank_card_token=binding_id
+            bank_card_token=binding_id,
+            channel_code=os.getenv("DOKU_DD_CHANNEL", "DIRECT_DEBIT_ALL"),
         )
 
         print(f"Status Code: {result['status_code']}")
@@ -393,14 +417,21 @@ def test_create_va_snap():
         )
 
         trx_id = f"TRX-VA-{uuid.uuid4().hex[:8].upper()}"
-        customer_no = "081234567890"
-        
-        # Mocking partner service id from client key (usually provided by DOKU)
-        partner_service_id = snap_client_key[:8].replace("-", "")
-        virtual_account_no = f"{partner_service_id}{customer_no}"
+        customer_no = os.getenv("DOKU_VA_CUSTOMER_NO", "00000000000000000001")
+        partner_service_id = os.getenv("DOKU_VA_PARTNER_SERVICE_ID", "").strip()
+        if not partner_service_id:
+            print("SKIP: Set DOKU_VA_PARTNER_SERVICE_ID untuk test SNAP VA.")
+            return False
+
+        if not customer_no.isdigit():
+            print("ERROR: DOKU_VA_CUSTOMER_NO harus hanya berisi digit.")
+            return False
+
+        virtual_account_no = ""  # biarkan helper di API yang merangkai
 
         print(f"Trx ID: {trx_id}")
-        print(f"VA No: {virtual_account_no}")
+        print(f"Customer No: {customer_no}")
+        print(f"Raw PartnerServiceId: '{partner_service_id}'")
 
         result = va_api.create_va(
             partner_service_id=partner_service_id,
@@ -440,6 +471,7 @@ def main():
     # 1. Get Token API (Implicitly tested in SNAP requests, but we can call it explicitly if needed)
     # We will assume it's working if QRIS/E-Wallet works.
     
+    test_get_token_api()
     test_signature()
     test_create_va()
     test_create_qris()

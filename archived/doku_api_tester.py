@@ -23,6 +23,8 @@ from typing import Optional, Dict, Any
 from enum import Enum
 import logging
 import os
+from decimal import Decimal, InvalidOperation
+import re
 
 # Setup logging
 logging.basicConfig(
@@ -441,20 +443,41 @@ class DokuSnapVirtualAccountApi(DokuSnapBaseApi):
     """
     ENDPOINT_CREATE_VA = "/virtual-accounts/bi-snap-va/v1.1/transfer-va/create-va"
 
+    @staticmethod
+    def _format_partner_service_id(raw: str) -> str:
+        value = (raw or "").rstrip("\r\n")
+        digits = value.strip()
+        digits = digits.replace(" ", "")
+        if not digits.isdigit() or len(digits) < 1 or len(digits) > 8:
+            raise ValueError("partnerServiceId harus 1-8 digit (akan di-pad spasi jadi 8 char).")
+        return digits.rjust(8, " ")
+
     def create_va(
         self,
-        partner_service_id: str, # Usually same as Client Key with padding
+        partner_service_id: str,
         customer_no: str,
-        virtual_account_no: str, # partnerServiceId + customerNo
+        virtual_account_no: Optional[str],
         amount_idr: int,
         trx_id: str,
         customer_name: str = "Test Customer",
         customer_email: str = "test@example.com",
     ) -> Dict[str, Any]:
+        partner_service_id_fmt = self._format_partner_service_id(partner_service_id)
+        customer_no_val = (customer_no or "").strip()
+        if not customer_no_val.isdigit():
+            raise ValueError("customerNo harus angka saja.")
+
+        virtual_account_no_val = (virtual_account_no or "").strip()
+        if not virtual_account_no_val:
+            virtual_account_no_val = f"{partner_service_id_fmt}{customer_no_val}"
+        else:
+            if virtual_account_no_val != f"{partner_service_id_fmt}{customer_no_val}":
+                raise ValueError("virtualAccountNo harus partnerServiceId + customerNo.")
+
         body = {
-            "partnerServiceId": partner_service_id,
-            "customerNo": customer_no,
-            "virtualAccountNo": virtual_account_no,
+            "partnerServiceId": partner_service_id_fmt,
+            "customerNo": customer_no_val,
+            "virtualAccountNo": virtual_account_no_val,
             "virtualAccountName": customer_name,
             "virtualAccountEmail": customer_email,
             "trxId": trx_id,
@@ -463,7 +486,7 @@ class DokuSnapVirtualAccountApi(DokuSnapBaseApi):
                 "currency": "IDR"
             },
             "additionalInfo": {
-                "channel": "VIRTUAL_ACCOUNT_BCA" # Default to BCA for testing
+                "channel": "VIRTUAL_ACCOUNT_BCA"
             }
         }
         return self._make_snap_request(self.ENDPOINT_CREATE_VA, body)
@@ -494,16 +517,26 @@ class DokuSnapQrisApi(DokuSnapBaseApi):
         if validity_period:
             body["validityPeriod"] = validity_period
         
-        # Additional Info Logic
-        additional_info = {}
+        fee_type_norm = fee_type.strip() if fee_type else None
+        fee_amount_norm = fee_amount.strip() if fee_amount else None
+
+        if fee_type_norm == "2" and not fee_amount_norm:
+            return {
+                "status_code": 400,
+                "data": {"error": {"message": "feeAmount wajib jika feeType=2"}},
+            }
+
+        additional_info: Dict[str, Any] = {}
         if postal_code:
             additional_info["postalCode"] = postal_code
-        if fee_type:
-            additional_info["feeType"] = fee_type
-            if fee_amount:
-                additional_info["feeAmount"] = fee_amount
-            else:
-                 logger.warning("feeType is set but feeAmount is missing! DOKU API might reject this.")
+        if fee_type_norm:
+            additional_info["feeType"] = fee_type_norm
+            if fee_amount_norm:
+                try:
+                    value = str(Decimal(fee_amount_norm).quantize(Decimal("0.01")))
+                except (InvalidOperation, ValueError):
+                    value = fee_amount_norm
+                body["feeAmount"] = {"value": value, "currency": "IDR"}
         
         if additional_info:
             body["additionalInfo"] = additional_info

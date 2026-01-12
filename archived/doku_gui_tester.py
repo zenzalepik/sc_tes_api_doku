@@ -47,6 +47,7 @@ class DokuGuiTester:
         self.root.title("DOKU API Tester (GUI)")
         self.root.geometry("1200x850")
         
+        self.snap_client = None
         self.qris_api = None
         self.ewallet_api = None
         self.dd_api = None
@@ -86,6 +87,7 @@ class DokuGuiTester:
                 environment=Environment.SANDBOX
             )
             client = DokuSnapClient(config)
+            self.snap_client = client
             
             # Init APIs
             self.qris_api = DokuSnapQrisApi(client, partner_id, merchant_id, terminal_id)
@@ -109,16 +111,12 @@ class DokuGuiTester:
         notebook = ttk.Notebook(main_frame)
         notebook.pack(fill=tk.BOTH, expand=True)
 
-        # VA Tab (SNAP)
         self.create_va_tab(notebook)
-        # QRIS Tab
         self.create_qris_tab(notebook)
-        # E-Wallet Tab
         self.create_ewallet_tab(notebook)
-        # Direct Debit Tab
         self.create_dd_tab(notebook)
-        # KKI Tab
         self.create_kki_tab(notebook)
+        self.create_tools_tab(notebook)
         
         # Logs Area
         log_frame = ttk.LabelFrame(main_frame, text="Logs", padding="5")
@@ -283,6 +281,17 @@ class DokuGuiTester:
         handler.setFormatter(formatter)
         logger.addHandler(handler)
 
+    def create_tools_tab(self, notebook):
+        frame = ttk.Frame(notebook, padding="10")
+        notebook.add(frame, text="Tools")
+
+        btn = ttk.Button(frame, text="Get Token API (B2B)", command=self.on_get_token)
+        btn.pack(anchor="w", pady=5)
+
+        ttk.Label(frame, text="Result JSON:").pack(anchor="w")
+        self.token_result_text = scrolledtext.ScrolledText(frame, height=15)
+        self.token_result_text.pack(fill=tk.BOTH, expand=True)
+
     def display_result(self, data, text_widget=None):
         widget = text_widget or self.result_text
         widget.delete(1.0, tk.END)
@@ -290,6 +299,15 @@ class DokuGuiTester:
 
     def run_async(self, func):
         threading.Thread(target=func, daemon=True).start()
+
+    def on_get_token(self):
+        def task():
+            if not getattr(self, "snap_client", None):
+                return
+            logging.info("Requesting B2B token...")
+            res = self.snap_client.get_b2b_token()
+            self.root.after(0, lambda: self.display_result(res, self.token_result_text))
+        self.run_async(task)
 
     # --- Handlers QRIS ---
 
@@ -309,6 +327,10 @@ class DokuGuiTester:
             fee_amount = self.qris_fee_amount.get().strip() or None
             
             logging.info(f"Fee Config -> Type: {fee_type}, Amount: {fee_amount}")
+
+            if (fee_type or "").strip() == "2" and not (fee_amount or "").strip():
+                self.root.after(0, lambda: messagebox.showerror("QRIS Fee", "Jika Fee Type = 2, Fee Amount wajib diisi."))
+                return
 
             res = self.qris_api.generate(
                 partner_reference_no=ref_no, 
@@ -434,22 +456,27 @@ class DokuGuiTester:
         form_frame = ttk.LabelFrame(frame, text="Payment Details", padding="5")
         form_frame.pack(fill=tk.X, pady=5)
         
-        ttk.Label(form_frame, text="Amount:").grid(row=0, column=0, sticky="w")
+        ttk.Label(form_frame, text="Partner Service ID:").grid(row=0, column=0, sticky="w")
+        self.va_partner_service_id = ttk.Entry(form_frame)
+        self.va_partner_service_id.insert(0, os.getenv("DOKU_VA_PARTNER_SERVICE_ID", ""))
+        self.va_partner_service_id.grid(row=0, column=1, sticky="ew", padx=5)
+
+        ttk.Label(form_frame, text="Amount:").grid(row=1, column=0, sticky="w")
         self.va_amount = ttk.Entry(form_frame)
         self.va_amount.insert(0, "10000")
-        self.va_amount.grid(row=0, column=1, sticky="ew", padx=5)
+        self.va_amount.grid(row=1, column=1, sticky="ew", padx=5)
         
-        ttk.Label(form_frame, text="Customer No:").grid(row=1, column=0, sticky="w")
+        ttk.Label(form_frame, text="Customer No:").grid(row=2, column=0, sticky="w")
         self.va_cust_no = ttk.Entry(form_frame)
         self.va_cust_no.insert(0, "081234567890")
-        self.va_cust_no.grid(row=1, column=1, sticky="ew", padx=5)
+        self.va_cust_no.grid(row=2, column=1, sticky="ew", padx=5)
         
-        ttk.Label(form_frame, text="Customer Name:").grid(row=2, column=0, sticky="w")
+        ttk.Label(form_frame, text="Customer Name:").grid(row=3, column=0, sticky="w")
         self.va_cust_name = ttk.Entry(form_frame)
         self.va_cust_name.insert(0, "Test Customer")
-        self.va_cust_name.grid(row=2, column=1, sticky="ew", padx=5)
+        self.va_cust_name.grid(row=3, column=1, sticky="ew", padx=5)
 
-        ttk.Button(form_frame, text="Create VA", command=self.on_create_va).grid(row=3, column=1, pady=10)
+        ttk.Button(form_frame, text="Create VA", command=self.on_create_va).grid(row=4, column=1, pady=10)
         
         ttk.Label(frame, text="Result JSON:").pack(anchor="w")
         self.va_result_text = scrolledtext.ScrolledText(frame, height=15)
@@ -460,25 +487,23 @@ class DokuGuiTester:
         cust_no = self.va_cust_no.get()
         cust_name = self.va_cust_name.get()
         trx_id = f"TRX-VA-{uuid.uuid4().hex[:8].upper()}"
+        partner_service_id = self.va_partner_service_id.get().strip()
         
         def task():
             if not self.va_api: return
             logging.info(f"Creating SNAP VA for {trx_id}...")
-            
-            # Construct Virtual Account No (Partner Service ID + Customer No)
-            # Usually Partner Service ID is 8 digits. We'll use client key prefix or env if available.
-            partner_service_id = self.va_api.partner_id[:8].replace("-","") 
-            # Fallback logic if partner_id is not suitable, user might need to set it properly
-            # For testing, we assume partner_id (Client Key) can be used or we hardcode a mock one if needed.
-            # But standard SNAP B2B, partnerServiceId is usually assigned.
-            
-            # Let's try to use what we have
-            virtual_account_no = f"{partner_service_id}{cust_no}"
+
+            if not partner_service_id:
+                self.root.after(0, lambda: messagebox.showerror("SNAP VA", "Partner Service ID wajib diisi."))
+                return
+            if not cust_no.isdigit():
+                self.root.after(0, lambda: messagebox.showerror("SNAP VA", "Customer No wajib angka saja."))
+                return
 
             res = self.va_api.create_va(
                 partner_service_id=partner_service_id,
                 customer_no=cust_no,
-                virtual_account_no=virtual_account_no,
+                virtual_account_no=None,
                 amount_idr=amount,
                 trx_id=trx_id,
                 customer_name=cust_name

@@ -1,0 +1,180 @@
+import tkinter as tk
+from tkinter import ttk, scrolledtext, messagebox, filedialog
+import threading
+import requests
+import datetime
+import base64
+import json
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding
+
+class DokuB2BTesterApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("DOKU B2B Token Tester")
+        self.root.geometry("800x700")
+
+        # Styles
+        style = ttk.Style()
+        style.configure("TLabel", font=("Segoe UI", 10))
+        style.configure("TButton", font=("Segoe UI", 10))
+        style.configure("TEntry", font=("Segoe UI", 10))
+
+        # Main Container
+        main_frame = ttk.Frame(root, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # --- Input Section ---
+        input_frame = ttk.LabelFrame(main_frame, text="Configuration", padding="10")
+        input_frame.pack(fill=tk.X, pady=(0, 10))
+
+        # Client ID
+        ttk.Label(input_frame, text="Client ID (X-CLIENT-KEY):").grid(row=0, column=0, sticky="w", pady=5)
+        self.client_id_var = tk.StringVar()
+        ttk.Entry(input_frame, textvariable=self.client_id_var, width=50).grid(row=0, column=1, sticky="w", padx=5)
+
+        # Target URL
+        ttk.Label(input_frame, text="Target URL:").grid(row=1, column=0, sticky="w", pady=5)
+        self.url_var = tk.StringVar(value="https://api-sandbox.doku.com/authorization/v1/access-token/b2b")
+        ttk.Entry(input_frame, textvariable=self.url_var, width=50).grid(row=1, column=1, sticky="w", padx=5)
+
+        # Private Key Selection
+        ttk.Label(input_frame, text="Private Key:").grid(row=2, column=0, sticky="nw", pady=5)
+        
+        key_btn_frame = ttk.Frame(input_frame)
+        key_btn_frame.grid(row=2, column=1, sticky="w", padx=5)
+        
+        ttk.Button(key_btn_frame, text="Load from File", command=self.load_private_key).pack(side=tk.LEFT, padx=5)
+        ttk.Label(key_btn_frame, text=" or Paste below (PEM format)").pack(side=tk.LEFT)
+
+        self.private_key_text = scrolledtext.ScrolledText(input_frame, height=8, width=60, font=("Consolas", 9))
+        self.private_key_text.grid(row=3, column=0, columnspan=2, pady=5, sticky="ew")
+
+        # Action Button
+        self.generate_btn = ttk.Button(input_frame, text="Generate Token", command=self.start_generation)
+        self.generate_btn.grid(row=4, column=0, columnspan=2, pady=10)
+
+        # --- Log Section ---
+        log_frame = ttk.LabelFrame(main_frame, text="Logs (Request & Response)", padding="10")
+        log_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Log Text Area (Selectable and Copyable)
+        self.log_text = scrolledtext.ScrolledText(log_frame, font=("Consolas", 10), state='normal')
+        self.log_text.pack(fill=tk.BOTH, expand=True)
+        
+        # Enable Ctrl+A to select all text
+        self.log_text.bind("<Control-a>", self.select_all)
+        self.log_text.bind("<Control-A>", self.select_all)
+        
+        # Add a clear button for logs
+        ttk.Button(log_frame, text="Clear Logs", command=self.clear_logs).pack(anchor="e", pady=(5, 0))
+
+    def select_all(self, event):
+        self.log_text.tag_add("sel", "1.0", "end")
+        return "break"
+
+    def load_private_key(self):
+        filename = filedialog.askopenfilename(title="Select Private Key", filetypes=[("PEM Files", "*.pem"), ("All Files", "*.*")])
+        if filename:
+            try:
+                with open(filename, 'r') as f:
+                    content = f.read()
+                    self.private_key_text.delete("1.0", tk.END)
+                    self.private_key_text.insert("1.0", content)
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to read file: {e}")
+
+    def clear_logs(self):
+        self.log_text.delete("1.0", tk.END)
+
+    def log(self, message):
+        self.log_text.insert(tk.END, message + "\n")
+        self.log_text.see(tk.END)
+
+    def start_generation(self):
+        # Run in thread to prevent freezing
+        threading.Thread(target=self.generate_token, daemon=True).start()
+
+    def generate_token(self):
+        client_id = self.client_id_var.get().strip()
+        url = self.url_var.get().strip()
+        private_key_pem = self.private_key_text.get("1.0", tk.END).strip()
+
+        if not client_id or not private_key_pem:
+            self.root.after(0, lambda: messagebox.showwarning("Missing Input", "Please provide Client ID and Private Key."))
+            return
+
+        self.root.after(0, lambda: self.generate_btn.configure(state="disabled"))
+        self.root.after(0, lambda: self.log("-" * 50))
+        self.root.after(0, lambda: self.log(f"Starting request to {url}..."))
+
+        try:
+            # 1. Generate Timestamp (ISO8601 UTC+0)
+            # Format: YYYY-MM-DDTHH:mm:ssZ
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            timestamp = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            # 2. Create String to Sign
+            # stringToSign = client_ID + "|" + X-TIMESTAMP
+            string_to_sign = f"{client_id}|{timestamp}"
+            
+            self.root.after(0, lambda: self.log(f"Timestamp: {timestamp}"))
+            self.root.after(0, lambda: self.log(f"String to Sign: {string_to_sign}"))
+
+            # 3. Sign the string
+            try:
+                private_key = serialization.load_pem_private_key(
+                    private_key_pem.encode('utf-8'),
+                    password=None
+                )
+            except ValueError:
+                self.root.after(0, lambda: self.log("Error: Invalid Private Key format."))
+                return
+
+            signature = private_key.sign(
+                string_to_sign.encode('utf-8'),
+                padding.PKCS1v15(),
+                hashes.SHA256()
+            )
+
+            # 4. Base64 Encode Signature
+            signature_b64 = base64.b64encode(signature).decode('utf-8')
+            
+            # 5. Prepare Headers and Body
+            headers = {
+                "X-CLIENT-KEY": client_id,
+                "X-TIMESTAMP": timestamp,
+                "X-SIGNATURE": signature_b64,
+                "Content-Type": "application/json"
+            }
+            
+            body = {
+                "grantType": "client_credentials"
+            }
+
+            self.root.after(0, lambda: self.log("\n--- Request Headers ---"))
+            self.root.after(0, lambda: self.log(json.dumps(headers, indent=2)))
+            self.root.after(0, lambda: self.log("\n--- Request Body ---"))
+            self.root.after(0, lambda: self.log(json.dumps(body, indent=2)))
+
+            # 6. Send Request
+            response = requests.post(url, json=body, headers=headers, timeout=30)
+
+            # 7. Handle Response
+            self.root.after(0, lambda: self.log(f"\n--- Response Status: {response.status_code} ---"))
+            try:
+                resp_json = response.json()
+                self.root.after(0, lambda: self.log(json.dumps(resp_json, indent=2)))
+            except:
+                self.root.after(0, lambda: self.log(response.text))
+
+        except Exception as e:
+            self.root.after(0, lambda: self.log(f"\nError occurred: {str(e)}"))
+        finally:
+            self.root.after(0, lambda: self.generate_btn.configure(state="normal"))
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = DokuB2BTesterApp(root)
+    root.mainloop()
